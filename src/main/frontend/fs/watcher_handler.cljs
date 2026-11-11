@@ -41,9 +41,33 @@
           (fn [b] [(:block/uuid b) :id (str (:block/uuid b))])
           missing-blocks))))))
 
+(defn- editing-page-of-file?
+  "True when the block currently being edited lives on the page backed by
+  `path`. A page that has no file yet (e.g. today's journal auto-created
+  in the db but never written) is matched by its default journal file path."
+  [path]
+  (when-let [block-uuid (:block/uuid (state/get-edit-block))]
+    (when-let [page (some-> (db/entity [:block/uuid block-uuid]) :block/page :db/id db/entity)]
+      (if-let [file-path (some-> page :block/file :db/id db/entity :file/path)]
+        (= file-path path)
+        (and (:block/journal? page)
+             (some? (:block/original-name page))
+             (= path (str (config/get-journals-directory) "/"
+                          (date/journal-title->default (:block/original-name page))
+                          "."
+                          (path/file-ext path))))))))
+
 (defn- handle-add-and-change!
   [repo path content db-content mtime backup?]
-  (p/let [;; save the previous content in a versioned bak file to avoid data overwritten.
+  (p/let [;; An editor textarea holds a stale copy of its block. Block uuids are
+          ;; reused when the file is re-parsed, so saving that stale value later
+          ;; would overwrite the incoming content.
+          _ (when (editing-page-of-file? path)
+              (state/clear-edit!)
+              ;; let the editor unmount (and flush its save) before the
+              ;; file is re-parsed, otherwise the flush lands on the new block
+              (p/delay 200))
+;; save the previous content in a versioned bak file to avoid data overwritten.
           _ (when backup?
               (-> (when-let [repo-dir (config/get-local-dir repo)]
                     (file-handler/backup-file! repo-dir path db-content content))
